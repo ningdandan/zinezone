@@ -4,10 +4,12 @@ import FirebaseAuth
 import FirebaseCore
 import GoogleSignIn
 import GoogleSignInSwift
+import CryptoKit
 
 struct LoginView: View {
     @StateObject var authViewModel = AuthViewModel()
     @EnvironmentObject var appState: AppStateViewModel
+    @State private var currentNonce: String?
     
     var body: some View {
         
@@ -27,9 +29,17 @@ struct LoginView: View {
                 .padding(.horizontal)
 
                 SignInWithAppleButton(.signIn, onRequest: { request in
+                    let nonce = randomNonceString()
+                    currentNonce = nonce
                     request.requestedScopes = [.fullName, .email]
+                    request.nonce = sha256(nonce)
                 }, onCompletion: { result in
-                    // 后面做Apple Sign-In
+                    switch result {
+                    case .success(let authResults):
+                        handleAppleSignIn(result: authResults)
+                    case .failure(let error):
+                        print("Apple Sign-In Error: \(error.localizedDescription)")
+                    }
                 })
                 .frame(height: 50)
                 .padding(.horizontal)
@@ -42,6 +52,38 @@ struct LoginView: View {
                         EmptyView()
                     }
                 }
+            }
+        }
+    }
+    
+    private func handleAppleSignIn(result: ASAuthorization) {
+        guard let appleIDCredential = result.credential as? ASAuthorizationAppleIDCredential else {
+            print("AppleID Credential not found")
+            return
+        }
+        
+        guard let tokenData = appleIDCredential.identityToken,
+              let idTokenString = String(data: tokenData, encoding: .utf8) else {
+            print("Unable to fetch identity token")
+            return
+        }
+        
+        let credential = OAuthProvider.credential(
+            withProviderID: "apple.com",
+            idToken: idTokenString,
+            rawNonce: currentNonce ?? ""
+        )
+        
+        Auth.auth().signIn(with: credential) { authResult, error in
+            if let error = error {
+                print("Firebase Sign-In Error with Apple: \(error.localizedDescription)")
+                return
+            }
+            
+            if let user = authResult?.user {
+                print("Apple Sign-In SUCCESS! UID: \(user.uid)")
+                authViewModel.handleSignIn(user: user)
+                self.appState.isLoggedIn = true
             }
         }
     }
@@ -88,5 +130,34 @@ struct LoginView: View {
                 }
             }
         }
+    }
+    private func sha256(_ input: String) -> String {
+        let inputData = Data(input.utf8)
+        let hashed = SHA256.hash(data: inputData)
+        return hashed.compactMap { String(format: "%02x", $0) }.joined()
+    }
+    private func randomNonceString(length: Int = 32) -> String {
+        precondition(length > 0)
+        let charset: [Character] =
+            Array("0123456789ABCDEFGHIJKLMNOPQRSTUVXYZabcdefghijklmnopqrstuvwxyz-._")
+        var result = ""
+        var remainingLength = length
+
+        while remainingLength > 0 {
+            let randoms = (0 ..< 16).map { _ in UInt8.random(in: 0...255) }
+
+            randoms.forEach { random in
+                if remainingLength == 0 {
+                    return
+                }
+
+                if random < charset.count {
+                    result.append(charset[Int(random)])
+                    remainingLength -= 1
+                }
+            }
+        }
+
+        return result
     }
 }
